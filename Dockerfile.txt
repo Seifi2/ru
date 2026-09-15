@@ -1,0 +1,60 @@
+# ============================================================================
+# TAJIK FINTECH CREDIT ENGINE
+# Multi-stage production build
+# ============================================================================
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+
+# ----------------------------------------------------------------------------
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    TZ=Asia/Dushanbe
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpq5 \
+        ca-certificates \
+        curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r credit && useradd -r -g credit -d /app -s /sbin/nologin credit
+
+WORKDIR /app
+
+COPY --from=builder /root/.local /home/credit/.local
+COPY --chown=credit:credit credit_engine.py /app/
+COPY --chown=credit:credit schema.sql /app/
+
+RUN mkdir -p /app/certs /app/logs && \
+    chown -R credit:credit /app
+
+USER credit
+
+ENV PATH=/home/credit/.local/bin:$PATH \
+    PYTHONPATH=/app
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -f http://localhost:8000/api/v1/system/health || exit 1
+
+CMD ["gunicorn", "credit_engine:app", \
+     "-k", "uvicorn.workers.UvicornWorker", \
+     "-w", "4", \
+     "-b", "0.0.0.0:8000", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-", \
+     "--timeout", "120", \
+     "--graceful-timeout", "30", \
+     "--keep-alive", "5"]
